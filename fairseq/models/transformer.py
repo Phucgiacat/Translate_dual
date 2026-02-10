@@ -14,6 +14,7 @@ from fairseq.models import (
     FairseqEncoder,
     FairseqEncoderDecoderModel,
     FairseqIncrementalDecoder,
+    graph_encoder,
     register_model,
     register_model_architecture,
 )
@@ -21,6 +22,7 @@ from fairseq.models.fairseq_encoder import EncoderOut
 from fairseq.modules import (
     AdaptiveSoftmax,
     LayerNorm,
+    MultiheadAttention,
     PositionalEmbedding,
     SinusoidalPositionalEmbedding,
     TransformerDecoderLayer,
@@ -31,6 +33,150 @@ from torch import Tensor
 
 DEFAULT_MAX_SOURCE_POSITIONS = 1024
 DEFAULT_MAX_TARGET_POSITIONS = 1024
+
+
+class GraphTransformerDecoderLayer(TransformerDecoderLayer):
+    def __init__(self, args, no_encoder_attn=False, add_bias_kv=False, add_zero_attn=False):
+        super().__init__(args, no_encoder_attn, add_bias_kv=add_bias_kv, add_zero_attn=add_zero_attn)
+        export = getattr(args, "char_inputs", False)
+        self.graph_attn = MultiheadAttention(
+            self.embed_dim,
+            args.decoder_attention_heads,
+            dropout=args.attention_dropout,
+            encoder_decoder_attention=True,
+        )
+        self.graph_attn_layer_norm = LayerNorm(self.embed_dim, export=export)
+
+    def forward(
+        self,
+        x,
+        encoder_out: Optional[torch.Tensor] = None,
+        encoder_padding_mask: Optional[torch.Tensor] = None,
+        graph_encoder_out: Optional[torch.Tensor] = None,
+        graph_encoder_padding_mask: Optional[torch.Tensor] = None,
+        incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
+        prev_self_attn_state: Optional[List[torch.Tensor]] = None,
+        prev_attn_state: Optional[List[torch.Tensor]] = None,
+        self_attn_mask: Optional[torch.Tensor] = None,
+        self_attn_padding_mask: Optional[torch.Tensor] = None,
+        need_attn: bool = False,
+        need_head_weights: bool = False,
+    ):
+        if need_head_weights:
+            need_attn = True
+
+        residual = x
+        if self.normalize_before:
+            x = self.self_attn_layer_norm(x)
+        if prev_self_attn_state is not None:
+            prev_key, prev_value = prev_self_attn_state[:2]
+            saved_state: Dict[str, Optional[Tensor]] = {
+                "prev_key": prev_key,
+                "prev_value": prev_value,
+            }
+            if len(prev_self_attn_state) >= 3:
+                saved_state["prev_key_padding_mask"] = prev_self_attn_state[2]
+            assert incremental_state is not None
+            self.self_attn._set_input_buffer(incremental_state, saved_state)
+
+        if self.cross_self_attention and encoder_out is not None:
+            encoder_padding_mask = (
+                torch.cat(
+                    (encoder_padding_mask, self_attn_padding_mask), dim=1
+                )
+                if encoder_padding_mask is not None
+                else self_attn_padding_mask
+            )
+            assert encoder_out is not None
+            y = torch.cat((encoder_out, x), dim=0)
+        else:
+            y = x
+
+        x, attn = self.self_attn(
+            query=x,
+            key=y,
+            value=y,
+            key_padding_mask=self_attn_padding_mask,
+            incremental_state=incremental_state,
+            need_weights=False,
+            attn_mask=self_attn_mask,
+        )
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = residual + x
+        if not self.normalize_before:
+            x = self.self_attn_layer_norm(x)
+
+        if self.encoder_attn is not None:
+            residual = x
+            if self.normalize_before:
+                x = self.encoder_attn_layer_norm(x)
+            if prev_attn_state is not None:
+                prev_key, prev_value = prev_attn_state[:2]
+                saved_state = {
+                    "prev_key": prev_key,
+                    "prev_value": prev_value,
+                }
+                if len(prev_attn_state) >= 3:
+                    saved_state["prev_key_padding_mask"] = prev_attn_state[2]
+                assert incremental_state is not None
+                self.encoder_attn._set_input_buffer(incremental_state, saved_state)
+
+            x, attn = self.encoder_attn(
+                query=x,
+                key=encoder_out,
+                value=encoder_out,
+                key_padding_mask=encoder_padding_mask,
+                incremental_state=incremental_state,
+                static_kv=True,
+                need_weights=need_attn or (not self.training and self.need_attn),
+                need_head_weights=need_head_weights,
+            )
+            x = F.dropout(x, p=self.dropout, training=self.training)
+            x = residual + x
+            if not self.normalize_before:
+                x = self.encoder_attn_layer_norm(x)
+
+        if graph_encoder_out is not None:
+            residual = x
+            if self.normalize_before:
+                x = self.graph_attn_layer_norm(x)
+            x, _ = self.graph_attn(
+                query=x,
+                key=graph_encoder_out,
+                value=graph_encoder_out,
+                key_padding_mask=graph_encoder_padding_mask,
+                incremental_state=incremental_state,
+                static_kv=True,
+                need_weights=False,
+            )
+            x = F.dropout(x, p=self.dropout, training=self.training)
+            x = residual + x
+            if not self.normalize_before:
+                x = self.graph_attn_layer_norm(x)
+
+        residual = x
+        if self.normalize_before:
+            x = self.final_layer_norm(x)
+        x = self.activation_fn(self.fc1(x))
+        x = F.dropout(x, p=float(self.activation_dropout), training=self.training)
+        x = self.fc2(x)
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = residual + x
+        if not self.normalize_before:
+            x = self.final_layer_norm(x)
+        if self.onnx_trace and incremental_state is not None:
+            saved_state = self.self_attn._get_input_buffer(incremental_state)
+            assert saved_state is not None
+            if self_attn_padding_mask is not None:
+                self_attn_state = [
+                    saved_state["prev_key"],
+                    saved_state["prev_value"],
+                    saved_state["prev_key_padding_mask"],
+                ]
+            else:
+                self_attn_state = [saved_state["prev_key"], saved_state["prev_value"]]
+            return x, attn, self_attn_state
+        return x, attn, None
 
 
 @register_model("transformer")
@@ -84,8 +230,8 @@ class TransformerModel(FairseqEncoderDecoderModel):
         }
         # fmt: on
 
-    def __init__(self, args, encoder, decoder):
-        super().__init__(encoder, decoder)
+    def __init__(self, args, encoder, decoder, graph_encoder=None):
+        super().__init__(encoder, decoder, graph_encoder)
         self.args = args
         self.supports_align_args = True
 
@@ -142,6 +288,11 @@ class TransformerModel(FairseqEncoderDecoderModel):
                                  'Must be used with adaptive_loss criterion'),
         parser.add_argument('--adaptive-softmax-dropout', type=float, metavar='D',
                             help='sets adaptive softmax dropout for the tail projections')
+        # graph settings
+        parser.add_argument('--n-graph-layers', type=int, metavar='N')
+        parser.add_argument('--graph-encoder-embed-dim', type=int, metavar='N')
+        parser.add_argument('--graph-in-dropout', type=float, metavar='N')
+        parser.add_argument('--graph-out-dropout', type=float, metavar='N')
         # args for "Cross+Self-Attention for Transformer Models" (Peitz et al., 2019)
         parser.add_argument('--no-cross-attention', default=False, action='store_true',
                             help='do not perform cross-attention')
@@ -170,6 +321,8 @@ class TransformerModel(FairseqEncoderDecoderModel):
 
         # make sure all arguments are present in older models
         base_architecture(args)
+        if isinstance(args.with_amr, str):
+            args.with_amr = options.eval_bool(args.with_amr)
 
         if args.encoder_layers_to_keep:
             args.encoder_layers = len(args.encoder_layers_to_keep.split(","))
@@ -210,8 +363,24 @@ class TransformerModel(FairseqEncoderDecoderModel):
             )
 
         encoder = cls.build_encoder(args, src_dict, encoder_embed_tokens)
+
+        g_encoder = None
+        if args.with_amr:
+            g_encoder = graph_encoder.GraphEncoder(
+                dictionary=task.amr_dict,
+                embedding_dim=args.graph_encoder_embed_dim,
+                output_dim=args.decoder_embed_dim,
+                dropout=args.graph_in_dropout,
+                pad_idx=task.amr_dict.pad(),
+                n_layers=args.n_graph_layers,
+                aggr=args.aggr,
+                concat=args.concat_in_aggr,
+                n_highway=args.n_highways,
+                direction=args.direction,
+            )
+
         decoder = cls.build_decoder(args, tgt_dict, decoder_embed_tokens)
-        return cls(args, encoder, decoder)
+        return cls(args, encoder, decoder, graph_encoder=g_encoder)
 
     @classmethod
     def build_embedding(cls, args, dictionary, embed_dim, path=None):
@@ -245,6 +414,8 @@ class TransformerModel(FairseqEncoderDecoderModel):
         src_tokens,
         src_lengths,
         prev_output_tokens,
+        graph_tokens: Optional[Dict[str, Tensor]] = None,
+        graph_lengths: Optional[Tensor] = None,
         cls_input: Optional[Tensor] = None,
         return_all_hiddens: bool = True,
         features_only: bool = False,
@@ -263,9 +434,14 @@ class TransformerModel(FairseqEncoderDecoderModel):
             cls_input=cls_input,
             return_all_hiddens=return_all_hiddens,
         )
+
+        graph_encoder_out = None
+        if self.graph_encoder is not None and graph_tokens is not None:
+            graph_encoder_out = self.graph_encoder(graph_tokens, graph_lengths)
         decoder_out = self.decoder(
             prev_output_tokens,
             encoder_out=encoder_out,
+            graph_encoder_out=graph_encoder_out,
             features_only=features_only,
             alignment_layer=alignment_layer,
             alignment_heads=alignment_heads,
@@ -676,12 +852,15 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             self.layernorm_embedding = None
 
     def build_decoder_layer(self, args, no_encoder_attn=False):
+        if getattr(args, "with_amr", False):
+            return GraphTransformerDecoderLayer(args, no_encoder_attn)
         return TransformerDecoderLayer(args, no_encoder_attn)
 
     def forward(
         self,
         prev_output_tokens,
         encoder_out: Optional[EncoderOut] = None,
+        graph_encoder_out: Optional[Dict[str, Tensor]] = None,
         incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
         features_only: bool = False,
         alignment_layer: Optional[int] = None,
@@ -708,6 +887,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         x, extra = self.extract_features(
             prev_output_tokens,
             encoder_out=encoder_out,
+            graph_encoder_out=graph_encoder_out,
             incremental_state=incremental_state,
             alignment_layer=alignment_layer,
             alignment_heads=alignment_heads,
@@ -720,6 +900,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self,
         prev_output_tokens,
         encoder_out: Optional[EncoderOut] = None,
+        graph_encoder_out: Optional[Dict[str, Tensor]] = None,
         incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
         full_context_alignment: bool = False,
         alignment_layer: Optional[int] = None,
@@ -770,6 +951,20 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         if positions is not None:
             x += positions
 
+        graph_encoder_state = None
+        graph_padding_mask = None
+        if graph_encoder_out is not None:
+            graph_hidden, graph_encoder_output = graph_encoder_out["encoder_out"]
+            graph_padding_mask = graph_encoder_out.get("encoder_padding_mask")
+            # ensure padding mask shape is B x N
+            if graph_padding_mask is not None and graph_padding_mask.dim() == 2:
+                if graph_padding_mask.size(0) == graph_encoder_output.size(1) and graph_padding_mask.size(1) == graph_encoder_output.size(0):
+                    graph_padding_mask = graph_padding_mask.t()
+            # add graph global embedding to token embeddings
+            x = x + graph_hidden.unsqueeze(1)
+            # B x N x C -> N x B x C
+            graph_encoder_state = graph_encoder_output.transpose(0, 1)
+
         if self.layernorm_embedding is not None:
             x = self.layernorm_embedding(x)
 
@@ -803,18 +998,34 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
             dropout_probability = torch.empty(1).uniform_()
             if not self.training or (dropout_probability > self.decoder_layerdrop):
-                x, layer_attn, _ = layer(
-                    x,
-                    encoder_state,
-                    encoder_out.encoder_padding_mask
-                    if encoder_out is not None
-                    else None,
-                    incremental_state,
-                    self_attn_mask=self_attn_mask,
-                    self_attn_padding_mask=self_attn_padding_mask,
-                    need_attn=bool((idx == alignment_layer)),
-                    need_head_weights=bool((idx == alignment_layer)),
-                )
+                if isinstance(layer, GraphTransformerDecoderLayer):
+                    x, layer_attn, _ = layer(
+                        x,
+                        encoder_state,
+                        encoder_out.encoder_padding_mask
+                        if encoder_out is not None
+                        else None,
+                        graph_encoder_state,
+                        graph_padding_mask,
+                        incremental_state,
+                        self_attn_mask=self_attn_mask,
+                        self_attn_padding_mask=self_attn_padding_mask,
+                        need_attn=bool((idx == alignment_layer)),
+                        need_head_weights=bool((idx == alignment_layer)),
+                    )
+                else:
+                    x, layer_attn, _ = layer(
+                        x,
+                        encoder_state,
+                        encoder_out.encoder_padding_mask
+                        if encoder_out is not None
+                        else None,
+                        incremental_state,
+                        self_attn_mask=self_attn_mask,
+                        self_attn_padding_mask=self_attn_padding_mask,
+                        need_attn=bool((idx == alignment_layer)),
+                        need_head_weights=bool((idx == alignment_layer)),
+                    )
                 inner_states.append(x)
                 if layer_attn is not None and idx == alignment_layer:
                     attn = layer_attn.float().to(x)
@@ -947,6 +1158,14 @@ def base_architecture(args):
     args.decoder_layers = getattr(args, "decoder_layers", 6)
     args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 8)
     args.decoder_normalize_before = getattr(args, "decoder_normalize_before", False)
+    # graph defaults
+    args.graph_encoder_embed_dim = getattr(args, "graph_encoder_embed_dim", 128)
+    args.graph_in_dropout = getattr(args, "graph_in_dropout", 0.2)
+    args.graph_out_dropout = getattr(args, "graph_out_dropout", 0.2)
+    args.n_graph_layers = getattr(args, "n_graph_layers", 2)
+    args.concat_in_aggr = getattr(args, "concat_in_aggr", True)
+    args.n_highways = getattr(args, "n_highways", 1)
+    args.direction = getattr(args, "direction", "bi")
     args.decoder_learned_pos = getattr(args, "decoder_learned_pos", False)
     args.attention_dropout = getattr(args, "attention_dropout", 0.0)
     args.activation_dropout = getattr(args, "activation_dropout", 0.0)

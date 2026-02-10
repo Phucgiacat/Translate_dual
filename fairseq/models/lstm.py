@@ -528,6 +528,10 @@ class LSTMDecoder(FairseqIncrementalDecoder):
 
                 input = torch.cat((x[j, :, :], input_feed, graph_input_feed), dim=1)
             elif input_feed is not None and graph_input_feed is None:
+                # Ensure input_feed batch size matches current batch
+                batch_size = x.size(1)
+                if input_feed.size(0) != batch_size:
+                    input_feed = input_feed.new_zeros(batch_size, input_feed.size(-1))
                 input = torch.cat((x[j, :, :], input_feed), dim=1)
             else:
                 input = x[j]
