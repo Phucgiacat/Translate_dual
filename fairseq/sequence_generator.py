@@ -394,7 +394,7 @@ class SequenceGenerator(object):
 
             # only consider eos when it's among the top beam_size indices
             torch.masked_select(
-                cand_bbsz_idx[:, :beam_size].to(eos_bbsz_idx.dtype),
+                cand_bbsz_idx[:, :beam_size],
                 mask=eos_mask[:, :beam_size],
                 out=eos_bbsz_idx,
             )
@@ -471,7 +471,7 @@ class SequenceGenerator(object):
             active_bbsz_idx = buffer('active_bbsz_idx')
             torch.gather(
                 cand_bbsz_idx, dim=1, index=active_hypos,
-                out=active_bbsz_idx.to(cand_bbsz_idx.dtype),
+                out=active_bbsz_idx,
             )
             active_scores = torch.gather(
                 cand_scores, dim=1, index=active_hypos,
@@ -482,24 +482,18 @@ class SequenceGenerator(object):
             active_scores = active_scores.view(-1)
 
             # copy tokens and scores for active hypotheses
-            if active_bbsz_idx.numel() > 0:
-                torch.index_select(
-                    tokens[:, :step + 1], dim=0, index=active_bbsz_idx,
-                    out=tokens_buf[:, :step + 1],
-                )
-            else:
-                # Khi không có active beams, resize output về kích thước phù hợp
-                tokens_buf[:, :step + 1].resize_(0, step + 1)
+            torch.index_select(
+                tokens[:, :step + 1], dim=0, index=active_bbsz_idx,
+                out=tokens_buf[:, :step + 1],
+            )
             torch.gather(
                 cand_indices, dim=1, index=active_hypos,
                 out=tokens_buf.view(bsz, beam_size, -1)[:, :, step + 1],
             )
             if step > 0:
-                out_slice = scores_buf[:, :step]
-                out_slice.resize_(active_bbsz_idx.size(0), step)
                 torch.index_select(
                     scores[:, :step], dim=0, index=active_bbsz_idx,
-                    out=out_slice,
+                    out=scores_buf[:, :step],
                 )
             torch.gather(
                 cand_scores, dim=1, index=active_hypos,

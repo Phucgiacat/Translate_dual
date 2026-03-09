@@ -50,7 +50,7 @@ class LSTMModel(FairseqEncoderDecoderModel):
         parser.add_argument('--graph-encoder-embed-dim', type=int, metavar='N')
         parser.add_argument('--graph-in-dropout', type=float, metavar='N')
         parser.add_argument('--graph-out-dropout', type=float, metavar='N')
-
+        parser.add_argument('--n-heads', type=int, metavar='N')
         # decoder settings
         parser.add_argument('--decoder-embed-dim', type=int, metavar='N',
                             help='decoder embedding dimension')
@@ -167,17 +167,29 @@ class LSTMModel(FairseqEncoderDecoderModel):
         )
         g_encoder = None
         if args.with_amr:
-            g_encoder = graph_encoder.GraphEncoder(dictionary=task.amr_dict,
-                                                   embedding_dim=args.graph_encoder_embed_dim,
-                                                   output_dim=args.decoder_hidden_size,
-                                                   dropout=args.graph_in_dropout,
-                                                   pad_idx=task.amr_dict.pad(),
-                                                   n_layers=args.n_graph_layers,
-                                                   aggr=args.aggr,
-                                                   concat=args.concat_in_aggr,
-                                                   n_highway=args.n_highways,
-                                                   direction=args.direction,
-                                                   )
+            # Keep backward compatibility with older GCN checkpoints.
+            if getattr(args, "aggr", None) == "gcn":
+                g_encoder = graph_encoder.GraphEncoder(
+                    dictionary=task.amr_dict,
+                    embedding_dim=args.graph_encoder_embed_dim,
+                    output_dim=args.decoder_hidden_size,
+                    dropout=args.graph_in_dropout,
+                    pad_idx=task.amr_dict.pad(),
+                    n_layers=args.n_graph_layers,
+                    aggr=args.aggr,
+                    concat=args.concat_in_aggr,
+                    n_highway=args.n_highways,
+                    direction=args.direction,
+                )
+            else:
+                g_encoder = graph_encoder.ViGraphEncoder(
+                    dictionary=task.amr_dict,
+                    embedding_dim=args.graph_encoder_embed_dim,
+                    hidden_dim=args.decoder_hidden_size,
+                    dropout=args.graph_in_dropout,
+                    n_layers=args.n_graph_layers,
+                    n_heads=args.n_heads,
+                )
 
         decoder = LSTMDecoder(
             dictionary=task.target_dictionary,
@@ -316,32 +328,15 @@ class AttentionLayer(nn.Module):
         self.input_proj = Linear(input_embed_dim, source_embed_dim, bias=bias)
         self.output_proj = Linear(input_embed_dim + source_embed_dim, output_embed_dim, bias=bias)
 
-    def forward(self, query, source_hids, encoder_padding_mask):
-        # query: (bsz, hidden_size)
-        # source_hids: (src_len, bsz, hidden_size)
-        input_query = query
-        # Thêm check này
-        if source_hids.size(1) == 0:
-            # Trả về zero attention khi không có source
-            bsz = query.size(0)
-            src_len = source_hids.size(0) if source_hids.dim() > 2 else 1
-            return query.new_zeros(bsz, query.size(1)), query.new_zeros(bsz, src_len)
-        
-        # x có shape (bsz, hidden_size)
-        x = self.input_proj(query)
-        
-        # Đảm bảo batch size khớp
-        bsz = x.size(0)
-        if source_hids.size(1) != bsz:
-            # Mở rộng source_hids để khớp với batch size
-            src_len = source_hids.size(0)
-            hidden_size = source_hids.size(2)
-            source_hids = source_hids[:, :1, :].expand(src_len, bsz, hidden_size)
-            if encoder_padding_mask is not None and encoder_padding_mask.size(0) != bsz:
-                encoder_padding_mask = encoder_padding_mask[:1, :].expand(bsz, -1)
-        
+    def forward(self, input, source_hids, encoder_padding_mask):
+        # input: bsz x input_embed_dim
+        # source_hids: srclen x bsz x source_embed_dim
+
+        # x: bsz x source_embed_dim
+        x = self.input_proj(input)
+        # compute attention
         attn_scores = (source_hids * x.unsqueeze(0)).sum(dim=2)
-        # ... rest of the code
+
         # don't attend over padding
         if encoder_padding_mask is not None:
             attn_scores = attn_scores.float().masked_fill_(
@@ -354,7 +349,7 @@ class AttentionLayer(nn.Module):
         # sum weighted sources
         x = (attn_scores.unsqueeze(2) * source_hids).sum(dim=0)
 
-        x = torch.tanh(self.output_proj(torch.cat((x, input_query), dim=1)))
+        x = torch.tanh(self.output_proj(torch.cat((x, input), dim=1)))
         return x, attn_scores
 
 
@@ -516,38 +511,16 @@ class LSTMDecoder(FairseqIncrementalDecoder):
         for j in range(seqlen):
             # input feeding: concatenate context vector from previous time step
             if input_feed is not None and graph_input_feed is not None:
-                # input = torch.cat((x[j, :, :], input_feed, graph_input_feed), dim=1)
-                # Kiểm tra và đảm bảo batch size khớp
-                batch_size = x.size(1)  # hoặc x[j, :, :].size(0)
-                if input_feed.size(0) != batch_size:
-                    # Resize hoặc tạo lại input_feed với đúng batch size
-                    input_feed = input_feed.new_zeros(batch_size, input_feed.size(-1))
-                if graph_input_feed.size(0) != batch_size:
-                    # Tương tự với graph_input_feed
-                    graph_input_feed = graph_input_feed.new_zeros(batch_size, graph_input_feed.size(-1))
-
                 input = torch.cat((x[j, :, :], input_feed, graph_input_feed), dim=1)
             elif input_feed is not None and graph_input_feed is None:
-                # Ensure input_feed batch size matches current batch
-                batch_size = x.size(1)
-                if input_feed.size(0) != batch_size:
-                    input_feed = input_feed.new_zeros(batch_size, input_feed.size(-1))
                 input = torch.cat((x[j, :, :], input_feed), dim=1)
             else:
                 input = x[j]
 
             for i, rnn in enumerate(self.layers):
-                # Kiểm tra và đảm bảo hidden states có đúng batch size
-                batch_size = input.size(0)
-                if prev_hiddens[i].size(0) != batch_size:
-                    # Khởi tạo lại hidden và cell với đúng batch size
-                    num_layers = 1  # hoặc lấy từ config của rnn
-                    hidden_size = prev_hiddens[i].size(-1)
-                    device = input.device
-                    prev_hiddens[i] = input.new_zeros(batch_size, hidden_size)
-                    prev_cells[i] = input.new_zeros(batch_size, hidden_size)
-
+                # recurrent cell
                 hidden, cell = rnn(input, (prev_hiddens[i], prev_cells[i]))
+
                 # hidden state becomes the input to the next layer
                 input = F.dropout(hidden, p=self.dropout_out, training=self.training)
 
@@ -557,11 +530,7 @@ class LSTMDecoder(FairseqIncrementalDecoder):
 
             # apply attention using the last layer's hidden state
             if self.src_attention is not None:
-                src_out, attn_scores_j = self.src_attention(hidden, encoder_outs, encoder_padding_mask)
-                if attn_scores_j.shape[0] == bsz:  # nếu [bsz, srclen]
-                    attn_scores[:, j, :] = attn_scores_j.t()  # chuyển thành [srclen, bsz]
-                else:  # nếu [srclen, bsz]
-                    attn_scores[:, j, :] = attn_scores_j
+                src_out, attn_scores[:, j, :] = self.src_attention(hidden, encoder_outs, encoder_padding_mask)
                 if self.with_graph:
                     graph_out, _ = self.graph_attention(hidden, graph_encoder_output.permute(1, 0, 2), node_mask)
             else:
@@ -692,6 +661,7 @@ def base_architecture(args):
     args.concat_in_aggr = getattr(args, 'concat_in_aggr', True)
     args.n_highways = getattr(args, 'n_highways', 1)
     args.direction = getattr(args, 'direction', 'bi')
+    args.n_heads = getattr(args, 'n_heads', 8)
 
     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
     args.decoder_embed_path = getattr(args, 'decoder_embed_path', None)

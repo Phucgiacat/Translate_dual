@@ -356,9 +356,6 @@ class FairseqTask(object):
 
     def inference_step(self, generator, models, sample, args, prefix_tokens=None):
         with torch.no_grad():
-            # SequenceScorer (used by --score-reference) does not take positional args.
-            if getattr(args, "score_reference", False):
-                return generator.generate(models, sample, prefix_tokens=prefix_tokens)
             return generator.generate(models, sample, args, prefix_tokens=prefix_tokens)
 
     def begin_epoch(self, epoch, model):
