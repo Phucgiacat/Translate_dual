@@ -171,6 +171,7 @@ def _main(args, output_file):
                         escape_unk=True,
                         extra_symbols_to_ignore={
                             generator.eos,
+                            tgt_dict.pad(),
                         }
                     )
 
@@ -195,6 +196,7 @@ def _main(args, output_file):
                     remove_bpe=args.remove_bpe,
                     extra_symbols_to_ignore={
                         generator.eos,
+                        tgt_dict.pad(),
                     }
                 )
                 detok_hypo_str = decode_fn(hypo_str)
