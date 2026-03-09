@@ -171,7 +171,6 @@ def _main(args, output_file):
                         escape_unk=True,
                         extra_symbols_to_ignore={
                             generator.eos,
-                            tgt_dict.pad(),
                         }
                     )
 
@@ -196,7 +195,6 @@ def _main(args, output_file):
                     remove_bpe=args.remove_bpe,
                     extra_symbols_to_ignore={
                         generator.eos,
-                        tgt_dict.pad(),
                     }
                 )
                 detok_hypo_str = decode_fn(hypo_str)
@@ -242,7 +240,7 @@ def _main(args, output_file):
                         # Convert back to tokens for evaluation with unk replacement and/or without BPE
                         target_tokens = tgt_dict.encode_line(target_str, add_if_not_exist=True)
                     if hasattr(scorer, 'add_string'):
-                        scorer.add_string(target_str, detok_hypo_str)
+                        scorer.add_string(target_str, hypo_str)
                     else:
                         scorer.add(target_tokens, hypo_tokens)
 
