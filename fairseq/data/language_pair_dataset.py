@@ -85,10 +85,10 @@ def cons_batch_graph(graphs, old_padding_idx, new_padding_idx=1):
     graph['edges_features'] = torch.from_numpy(np.array(list(g_edge_features.values())))
     graph['nodes'] = torch.from_numpy(np.array(g_nodes))
     graph['edges'] = torch.from_numpy(np.array(g_edges))
-    graph['out_indices'] = torch.from_numpy(np.array(list(g_fw_adj.values()), dtype=np.float))
-    graph['out_edges'] = torch.from_numpy(np.array(list(g_fw_edge.values()), dtype=np.float))
-    graph['in_indices'] = torch.from_numpy(np.array(list(g_bw_adj.values()), dtype=np.float))
-    graph['in_edges'] = torch.from_numpy(np.array(list(g_bw_edge.values()), dtype=np.float))
+    graph['out_indices'] = torch.from_numpy(np.array(list(g_fw_adj.values()), dtype=np.float64))
+    graph['out_edges'] = torch.from_numpy(np.array(list(g_fw_edge.values()), dtype=np.float64))
+    graph['in_indices'] = torch.from_numpy(np.array(list(g_bw_adj.values()), dtype=np.float64))
+    graph['in_edges'] = torch.from_numpy(np.array(list(g_bw_edge.values()), dtype=np.float64))
     return graph
 
 
