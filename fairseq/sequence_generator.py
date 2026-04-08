@@ -474,15 +474,8 @@ class SequenceGenerator(object):
             blacklist = new_blacklist.ge(cand_size)[:, :beam_size]
             assert (~blacklist).any(dim=1).all()
 
-            active_bbsz_idx = buffer('active_bbsz_idx')
-            torch.gather(
-                cand_bbsz_idx, dim=1, index=active_hypos,
-                out=active_bbsz_idx,
-            )
-            active_scores = torch.gather(
-                cand_scores, dim=1, index=active_hypos,
-                out=scores[:, step].view(bsz, beam_size),
-            )
+            active_bbsz_idx = cand_bbsz_idx.gather(dim=1, index=active_hypos)
+            active_scores = cand_scores.gather(dim=1, index=active_hypos)
 
             active_bbsz_idx = active_bbsz_idx.view(-1)
             active_scores = active_scores.view(-1)
