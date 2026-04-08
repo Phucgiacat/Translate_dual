@@ -50,7 +50,7 @@ class LSTMModel(FairseqEncoderDecoderModel):
         parser.add_argument('--graph-encoder-embed-dim', type=int, metavar='N')
         parser.add_argument('--graph-in-dropout', type=float, metavar='N')
         parser.add_argument('--graph-out-dropout', type=float, metavar='N')
-        parser.add_argument('--n-heads', type=int, metavar='N')
+
         # decoder settings
         parser.add_argument('--decoder-embed-dim', type=int, metavar='N',
                             help='decoder embedding dimension')
@@ -167,24 +167,17 @@ class LSTMModel(FairseqEncoderDecoderModel):
         )
         g_encoder = None
         if args.with_amr:
-            # g_encoder = graph_encoder.GraphEncoder(dictionary=task.amr_dict,
-            #                                        embedding_dim=args.graph_encoder_embed_dim,
-            #                                        output_dim=args.decoder_hidden_size,
-            #                                        dropout=args.graph_in_dropout,
-            #                                        pad_idx=task.amr_dict.pad(),
-            #                                        n_layers=args.n_graph_layers,
-            #                                        aggr=args.aggr,
-            #                                        concat=args.concat_in_aggr,
-            #                                        n_highway=args.n_highways,
-            #                                        direction=args.direction,
-            #                                        )
-            #
-            g_encoder = graph_encoder.ViGraphEncoder(dictionary=task.amr_dict,
-                                                     embedding_dim=args.graph_encoder_embed_dim,
-                                                     hidden_dim=args.decoder_hidden_size,
-                                                     dropout=args.graph_in_dropout,
-                                                     n_layers=args.n_graph_layers,
-                                                     n_heads = args.n_heads)
+            g_encoder = graph_encoder.GraphEncoder(dictionary=task.amr_dict,
+                                                   embedding_dim=args.graph_encoder_embed_dim,
+                                                   output_dim=args.decoder_hidden_size,
+                                                   dropout=args.graph_in_dropout,
+                                                   pad_idx=task.amr_dict.pad(),
+                                                   n_layers=args.n_graph_layers,
+                                                   aggr=args.aggr,
+                                                   concat=args.concat_in_aggr,
+                                                   n_highway=args.n_highways,
+                                                   direction=args.direction,
+                                                   )
 
         decoder = LSTMDecoder(
             dictionary=task.target_dictionary,
@@ -656,7 +649,6 @@ def base_architecture(args):
     args.concat_in_aggr = getattr(args, 'concat_in_aggr', True)
     args.n_highways = getattr(args, 'n_highways', 1)
     args.direction = getattr(args, 'direction', 'bi')
-    args.n_heads = getattr(args, 'n_heads', 8)
 
     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
     args.decoder_embed_path = getattr(args, 'decoder_embed_path', None)

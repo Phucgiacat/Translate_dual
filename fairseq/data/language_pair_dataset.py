@@ -321,8 +321,6 @@ class LanguagePairDataset(FairseqDataset):
         if self.amr is not None:
             # node_ids,edge_ids, in_neigh_edge_ids, in_neigh_indice_ids, out_neigh_edge_ids, out_neigh_indice_ids
             amr_idx = index * 6
-            if isinstance(self.amr, list) and len(self.amr) == 1:
-                self.amr = self.amr[0]
             nodes = self.amr[amr_idx]
             edges = self.amr[amr_idx + 1]
             in_neigh_edges = self.amr[amr_idx + 2]

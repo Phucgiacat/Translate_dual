@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from fairseq import utils
 from fairseq.modules import LayerNorm, MultiheadAttention
+from fairseq.modules.scale_norm import ScaleNorm
 from torch import Tensor
 
 
@@ -32,7 +33,10 @@ class TransformerEncoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = args.encoder_embed_dim
         self.self_attn = self.build_self_attention(self.embed_dim, args)
-        self.self_attn_layer_norm = LayerNorm(self.embed_dim)
+        if not args.use_scalenorm:
+            self.self_attn_layer_norm = LayerNorm(self.embed_dim)
+        else:
+            self.self_attn_layer_norm = ScaleNorm(self.embed_dim ** 0.5)
         self.dropout = args.dropout
         self.activation_fn = utils.get_activation_fn(
             activation=getattr(args, "activation_fn", "relu")
@@ -44,7 +48,10 @@ class TransformerEncoderLayer(nn.Module):
         self.normalize_before = args.encoder_normalize_before
         self.fc1 = self.build_fc1(self.embed_dim, args.encoder_ffn_embed_dim)
         self.fc2 = self.build_fc2(args.encoder_ffn_embed_dim, self.embed_dim)
-        self.final_layer_norm = LayerNorm(self.embed_dim)
+        if not args.use_scalenorm:
+            self.final_layer_norm = LayerNorm(self.embed_dim)
+        else:
+            self.final_layer_norm = ScaleNorm(self.embed_dim ** 0.5)
 
     def build_fc1(self, input_dim, output_dim):
         return nn.Linear(input_dim, output_dim)
@@ -145,7 +152,7 @@ class TransformerDecoderLayer(nn.Module):
     """
 
     def __init__(
-        self, args, no_encoder_attn=False, add_bias_kv=False, add_zero_attn=False
+            self, args, no_encoder_attn=False, add_bias_kv=False, add_zero_attn=False
     ):
         super().__init__()
         self.embed_dim = args.decoder_embed_dim
@@ -171,19 +178,24 @@ class TransformerDecoderLayer(nn.Module):
         # char_inputs can be used to determint this.
         # TODO  remove this once we update apex with the fix
         export = getattr(args, "char_inputs", False)
-        self.self_attn_layer_norm = LayerNorm(self.embed_dim, export=export)
-
+        if not args.use_scalenorm:
+            self.self_attn_layer_norm = LayerNorm(self.embed_dim, export=export)
+        else:
+            self.self_attn_layer_norm = ScaleNorm(self.embed_dim ** 0.5)
+        self.with_graph = args.with_amr
         if no_encoder_attn:
             self.encoder_attn = None
             self.encoder_attn_layer_norm = None
         else:
             self.encoder_attn = self.build_encoder_attention(self.embed_dim, args)
-            self.encoder_attn_layer_norm = LayerNorm(self.embed_dim, export=export)
-
+            self.encoder_attn_layer_norm = LayerNorm(self.embed_dim, export=export) if not args.use_scalenorm else ScaleNorm(self.embed_dim ** 0.5)
+            if self.with_graph:
+                self.graph_encoder_attn = self.build_encoder_attention(self.embed_dim, args, graph=True)
+                self.graph_attn_layer_norm = LayerNorm(self.embed_dim, export=export) if not args.use_scalenorm else ScaleNorm(self.embed_dim ** 0.5)
         self.fc1 = self.build_fc1(self.embed_dim, args.decoder_ffn_embed_dim)
         self.fc2 = self.build_fc2(args.decoder_ffn_embed_dim, self.embed_dim)
 
-        self.final_layer_norm = LayerNorm(self.embed_dim, export=export)
+        self.final_layer_norm = LayerNorm(self.embed_dim, export=export) if not args.use_scalenorm else ScaleNorm(self.embed_dim ** 0.5)
         self.need_attn = True
 
         self.onnx_trace = False
@@ -204,10 +216,10 @@ class TransformerDecoderLayer(nn.Module):
             self_attention=not getattr(args, "cross_self_attention", False),
         )
 
-    def build_encoder_attention(self, embed_dim, args):
+    def build_encoder_attention(self, embed_dim, args, graph=False):
         return MultiheadAttention(
             embed_dim,
-            args.decoder_attention_heads,
+            args.decoder_attention_heads if graph is False else args.graph_attention_heads,
             kdim=getattr(args, "encoder_embed_dim", None),
             vdim=getattr(args, "encoder_embed_dim", None),
             dropout=args.attention_dropout,
@@ -218,17 +230,19 @@ class TransformerDecoderLayer(nn.Module):
         self.onnx_trace = True
 
     def forward(
-        self,
-        x,
-        encoder_out: Optional[torch.Tensor] = None,
-        encoder_padding_mask: Optional[torch.Tensor] = None,
-        incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
-        prev_self_attn_state: Optional[List[torch.Tensor]] = None,
-        prev_attn_state: Optional[List[torch.Tensor]] = None,
-        self_attn_mask: Optional[torch.Tensor] = None,
-        self_attn_padding_mask: Optional[torch.Tensor] = None,
-        need_attn: bool = False,
-        need_head_weights: bool = False,
+            self,
+            x,
+            encoder_out: Optional[torch.Tensor] = None,
+            encoder_padding_mask: Optional[torch.Tensor] = None,
+            graph_encoder_out=None,
+            graph_encoder_padding_mask=None,
+            incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
+            prev_self_attn_state: Optional[List[torch.Tensor]] = None,
+            prev_attn_state: Optional[List[torch.Tensor]] = None,
+            self_attn_mask: Optional[torch.Tensor] = None,
+            self_attn_padding_mask: Optional[torch.Tensor] = None,
+            need_attn: bool = False,
+            need_head_weights: bool = False,
     ):
         """
         Args:
@@ -261,9 +275,9 @@ class TransformerDecoderLayer(nn.Module):
             self.self_attn._set_input_buffer(incremental_state, saved_state)
         _self_attn_input_buffer = self.self_attn._get_input_buffer(incremental_state)
         if self.cross_self_attention and not (
-            incremental_state is not None
-            and _self_attn_input_buffer is not None
-            and "prev_key" in _self_attn_input_buffer
+                incremental_state is not None
+                and _self_attn_input_buffer is not None
+                and "prev_key" in _self_attn_input_buffer
         ):
             if self_attn_mask is not None:
                 assert encoder_out is not None
@@ -301,7 +315,9 @@ class TransformerDecoderLayer(nn.Module):
         if self.encoder_attn is not None:
             residual = x
             if self.normalize_before:
-                x = self.encoder_attn_layer_norm(x)
+                x_src = self.encoder_attn_layer_norm(x)
+            else:
+                x_src = x
             if prev_attn_state is not None:
                 prev_key, prev_value = prev_attn_state[:2]
                 saved_state: Dict[str, Optional[Tensor]] = {
@@ -313,8 +329,8 @@ class TransformerDecoderLayer(nn.Module):
                 assert incremental_state is not None
                 self.encoder_attn._set_input_buffer(incremental_state, saved_state)
 
-            x, attn = self.encoder_attn(
-                query=x,
+            x_src, attn = self.encoder_attn(
+                query=x_src,
                 key=encoder_out,
                 value=encoder_out,
                 key_padding_mask=encoder_padding_mask,
@@ -323,10 +339,33 @@ class TransformerDecoderLayer(nn.Module):
                 need_weights=need_attn or (not self.training and self.need_attn),
                 need_head_weights=need_head_weights,
             )
-            x = F.dropout(x, p=self.dropout, training=self.training)
-            x = residual + x
+            x_src = F.dropout(x_src, p=self.dropout, training=self.training)
+            x_src = residual + x_src
             if not self.normalize_before:
-                x = self.encoder_attn_layer_norm(x)
+                x_src = self.encoder_attn_layer_norm(x_src)
+
+            if self.with_graph:
+                if self.normalize_before:
+                    x_graph = self.graph_attn_layer_norm(x)
+                else:
+                    x_graph = x
+                x_graph, g_attn = self.graph_encoder_attn(
+                    query=x_graph,
+                    key=graph_encoder_out,
+                    value=graph_encoder_out,
+                    key_padding_mask=graph_encoder_padding_mask,
+                    incremental_state=incremental_state,
+                    static_kv=True,
+                    need_weights=need_attn or (not self.training and self.need_attn),
+                    need_head_weights=need_head_weights,
+                )
+                x_graph = F.dropout(x_graph, p=self.dropout, training=self.training)
+                x_graph = residual + x_graph
+                if not self.normalize_before:
+                    x_graph = self.graph_attn_layer_norm(x_graph)
+                x = x_src + x_graph
+            else:
+                x = x_src
 
         residual = x
         if self.normalize_before:
@@ -357,15 +396,17 @@ class TransformerDecoderLayer(nn.Module):
 
     @torch.jit.export
     def reorder_incremental_state(
-        self,
-        incremental_state: Dict[str, Dict[str, Optional[Tensor]]],
-        new_order: Tensor,
+            self,
+            incremental_state: Dict[str, Dict[str, Optional[Tensor]]],
+            new_order: Tensor,
     ):
         """Scriptable reorder incremental state in transformer layers."""
         self.self_attn.reorder_incremental_state(incremental_state, new_order)
 
         if self.encoder_attn is not None:
             self.encoder_attn.reorder_incremental_state(incremental_state, new_order)
+        if self.with_graph and self.graph_encoder_attn is not None:
+            self.graph_encoder_attn.reorder_incremental_state(incremental_state, new_order)
 
 
 def Linear(in_features, out_features, bias=True):

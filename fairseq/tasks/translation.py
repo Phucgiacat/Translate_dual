@@ -284,8 +284,8 @@ class TranslationTask(FairseqTask):
             truncate_source=self.args.truncate_source,
         )
 
-    def build_dataset_for_inference(self, src_tokens, src_lengths, amr_tokens=None, amr_lengths=None):
-        return LanguagePairDataset(src_tokens, src_lengths, self.source_dictionary, amr=amr_tokens, amr_sizes=amr_lengths, amr_dict=self.amr_dict)
+    def build_dataset_for_inference(self, src_tokens, src_lengths):
+        return LanguagePairDataset(src_tokens, src_lengths, self.source_dictionary)
 
     def build_model(self, args):
         if getattr(args, 'eval_bleu', False):

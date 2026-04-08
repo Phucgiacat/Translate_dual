@@ -505,6 +505,9 @@ def add_generation_args(parser):
     add_common_eval_args(group)
     # fmt: off
     group.add_argument('--with-amr', default=False, type=bool, metavar='N')
+    group.add_argument('--plot-attn',default=False, type=bool, metavar='N')
+    group.add_argument('--min-plot-len', default=10, type=int, metavar='N')
+    group.add_argument('--max-plot-len', default=15, type=int, metavar='N')
     group.add_argument('--beam', default=5, type=int, metavar='N',
                        help='beam size')
     group.add_argument('--nbest', default=1, type=int, metavar='N',

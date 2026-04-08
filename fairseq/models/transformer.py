@@ -27,7 +27,7 @@ from fairseq.modules import (
     TransformerEncoderLayer,
 )
 from torch import Tensor
-
+from fairseq.models import graph_encoder
 
 DEFAULT_MAX_SOURCE_POSITIONS = 1024
 DEFAULT_MAX_TARGET_POSITIONS = 1024
@@ -70,22 +70,32 @@ class TransformerModel(FairseqEncoderDecoderModel):
             }
 
         return {
-            'transformer.wmt14.en-fr': moses_subword('https://dl.fbaipublicfiles.com/fairseq/models/wmt14.en-fr.joined-dict.transformer.tar.bz2'),
+            'transformer.wmt14.en-fr': moses_subword(
+                'https://dl.fbaipublicfiles.com/fairseq/models/wmt14.en-fr.joined-dict.transformer.tar.bz2'),
             'transformer.wmt16.en-de': 'https://dl.fbaipublicfiles.com/fairseq/models/wmt16.en-de.joined-dict.transformer.tar.bz2',
-            'transformer.wmt18.en-de': moses_subword('https://dl.fbaipublicfiles.com/fairseq/models/wmt18.en-de.ensemble.tar.gz'),
-            'transformer.wmt19.en-de': moses_fastbpe('https://dl.fbaipublicfiles.com/fairseq/models/wmt19.en-de.joined-dict.ensemble.tar.gz'),
-            'transformer.wmt19.en-ru': moses_fastbpe('https://dl.fbaipublicfiles.com/fairseq/models/wmt19.en-ru.ensemble.tar.gz'),
-            'transformer.wmt19.de-en': moses_fastbpe('https://dl.fbaipublicfiles.com/fairseq/models/wmt19.de-en.joined-dict.ensemble.tar.gz'),
-            'transformer.wmt19.ru-en': moses_fastbpe('https://dl.fbaipublicfiles.com/fairseq/models/wmt19.ru-en.ensemble.tar.gz'),
-            'transformer.wmt19.en-de.single_model': moses_fastbpe('https://dl.fbaipublicfiles.com/fairseq/models/wmt19.en-de.joined-dict.single_model.tar.gz'),
-            'transformer.wmt19.en-ru.single_model': moses_fastbpe('https://dl.fbaipublicfiles.com/fairseq/models/wmt19.en-ru.single_model.tar.gz'),
-            'transformer.wmt19.de-en.single_model': moses_fastbpe('https://dl.fbaipublicfiles.com/fairseq/models/wmt19.de-en.joined-dict.single_model.tar.gz'),
-            'transformer.wmt19.ru-en.single_model': moses_fastbpe('https://dl.fbaipublicfiles.com/fairseq/models/wmt19.ru-en.single_model.tar.gz'),
+            'transformer.wmt18.en-de': moses_subword(
+                'https://dl.fbaipublicfiles.com/fairseq/models/wmt18.en-de.ensemble.tar.gz'),
+            'transformer.wmt19.en-de': moses_fastbpe(
+                'https://dl.fbaipublicfiles.com/fairseq/models/wmt19.en-de.joined-dict.ensemble.tar.gz'),
+            'transformer.wmt19.en-ru': moses_fastbpe(
+                'https://dl.fbaipublicfiles.com/fairseq/models/wmt19.en-ru.ensemble.tar.gz'),
+            'transformer.wmt19.de-en': moses_fastbpe(
+                'https://dl.fbaipublicfiles.com/fairseq/models/wmt19.de-en.joined-dict.ensemble.tar.gz'),
+            'transformer.wmt19.ru-en': moses_fastbpe(
+                'https://dl.fbaipublicfiles.com/fairseq/models/wmt19.ru-en.ensemble.tar.gz'),
+            'transformer.wmt19.en-de.single_model': moses_fastbpe(
+                'https://dl.fbaipublicfiles.com/fairseq/models/wmt19.en-de.joined-dict.single_model.tar.gz'),
+            'transformer.wmt19.en-ru.single_model': moses_fastbpe(
+                'https://dl.fbaipublicfiles.com/fairseq/models/wmt19.en-ru.single_model.tar.gz'),
+            'transformer.wmt19.de-en.single_model': moses_fastbpe(
+                'https://dl.fbaipublicfiles.com/fairseq/models/wmt19.de-en.joined-dict.single_model.tar.gz'),
+            'transformer.wmt19.ru-en.single_model': moses_fastbpe(
+                'https://dl.fbaipublicfiles.com/fairseq/models/wmt19.ru-en.single_model.tar.gz'),
         }
         # fmt: on
 
-    def __init__(self, args, encoder, decoder):
-        super().__init__(encoder, decoder)
+    def __init__(self, args, encoder, decoder, graph_encoder=None):
+        super().__init__(encoder, decoder, graph_encoder)
         self.args = args
         self.supports_align_args = True
 
@@ -116,6 +126,14 @@ class TransformerModel(FairseqEncoderDecoderModel):
                             help='apply layernorm before each encoder block')
         parser.add_argument('--encoder-learned-pos', action='store_true',
                             help='use learned positional embeddings in the encoder')
+
+        # graph settings
+        parser.add_argument('--n-graph-layers', type=int, metavar='N')
+        parser.add_argument('--graph-encoder-embed-dim', type=int, metavar='N')
+        parser.add_argument('--graph-in-dropout', type=float, metavar='N')
+        parser.add_argument('--graph-out-dropout', type=float, metavar='N')
+        parser.add_argument('--graph-attention-heads', type=int, metavar='N')
+
         parser.add_argument('--decoder-embed-path', type=str, metavar='STR',
                             help='path to pre-trained decoder embedding')
         parser.add_argument('--decoder-embed-dim', type=int, metavar='N',
@@ -130,6 +148,8 @@ class TransformerModel(FairseqEncoderDecoderModel):
                             help='use learned positional embeddings in the decoder')
         parser.add_argument('--decoder-normalize-before', action='store_true',
                             help='apply layernorm before each decoder block')
+        parser.add_argument('--use-scalenorm', type=bool,
+                            help='using scale norm instead of layerNorm')
         parser.add_argument('--share-decoder-input-output-embed', action='store_true',
                             help='share decoder input and output embeddings')
         parser.add_argument('--share-all-embeddings', action='store_true',
@@ -191,7 +211,7 @@ class TransformerModel(FairseqEncoderDecoderModel):
                     "--share-all-embeddings requires --encoder-embed-dim to match --decoder-embed-dim"
                 )
             if args.decoder_embed_path and (
-                args.decoder_embed_path != args.encoder_embed_path
+                    args.decoder_embed_path != args.encoder_embed_path
             ):
                 raise ValueError(
                     "--share-all-embeddings not compatible with --decoder-embed-path"
@@ -210,8 +230,11 @@ class TransformerModel(FairseqEncoderDecoderModel):
             )
 
         encoder = cls.build_encoder(args, src_dict, encoder_embed_tokens)
+        graph_encoder = None
+        if args.with_amr:
+            graph_encoder = cls.build_graph_encoder(args, task.amr_dict)
         decoder = cls.build_decoder(args, tgt_dict, decoder_embed_tokens)
-        return cls(args, encoder, decoder)
+        return cls(args, encoder, decoder, graph_encoder=graph_encoder)
 
     @classmethod
     def build_embedding(cls, args, dictionary, embed_dim, path=None):
@@ -230,6 +253,20 @@ class TransformerModel(FairseqEncoderDecoderModel):
         return TransformerEncoder(args, src_dict, embed_tokens)
 
     @classmethod
+    def build_graph_encoder(cls, args, amr_dict):
+        return graph_encoder.GraphEncoder(dictionary=amr_dict,
+                                          embedding_dim=args.graph_encoder_embed_dim,
+                                          output_dim=args.decoder_embed_dim,
+                                          dropout=args.graph_in_dropout,
+                                          pad_idx=amr_dict.pad(),
+                                          n_layers=args.n_graph_layers,
+                                          aggr=args.aggr,
+                                          concat=args.concat_in_aggr,
+                                          n_highway=args.n_highways,
+                                          direction=args.direction,
+                                          )
+
+    @classmethod
     def build_decoder(cls, args, tgt_dict, embed_tokens):
         return TransformerDecoder(
             args,
@@ -241,15 +278,17 @@ class TransformerModel(FairseqEncoderDecoderModel):
     # TorchScript doesn't support optional arguments with variable length (**kwargs).
     # Current workaround is to add union of all arguments in child classes.
     def forward(
-        self,
-        src_tokens,
-        src_lengths,
-        prev_output_tokens,
-        cls_input: Optional[Tensor] = None,
-        return_all_hiddens: bool = True,
-        features_only: bool = False,
-        alignment_layer: Optional[int] = None,
-        alignment_heads: Optional[int] = None,
+            self,
+            src_tokens,
+            src_lengths,
+            graph_tokens=None,
+            graph_lengths=None,
+            prev_output_tokens=None,
+            cls_input: Optional[Tensor] = None,
+            return_all_hiddens: bool = True,
+            features_only: bool = False,
+            alignment_layer: Optional[int] = None,
+            alignment_heads: Optional[int] = None,
     ):
         """
         Run the forward pass for an encoder-decoder model.
@@ -263,9 +302,14 @@ class TransformerModel(FairseqEncoderDecoderModel):
             cls_input=cls_input,
             return_all_hiddens=return_all_hiddens,
         )
+        graph_encoder_out = None
+        if graph_tokens is not None:
+            graph_encoder_out = self.graph_encoder(graph_tokens, graph_lengths)
+
         decoder_out = self.decoder(
             prev_output_tokens,
             encoder_out=encoder_out,
+            graph_encoder_out=graph_encoder_out,
             features_only=features_only,
             alignment_layer=alignment_layer,
             alignment_heads=alignment_heads,
@@ -279,15 +323,13 @@ class TransformerModel(FairseqEncoderDecoderModel):
     # helper function in the Base Class.
     @torch.jit.export
     def get_normalized_probs(
-        self,
-        net_output: Tuple[Tensor, Dict[str, List[Optional[Tensor]]]],
-        log_probs: bool,
-        sample: Optional[Dict[str, Tensor]] = None,
+            self,
+            net_output: Tuple[Tensor, Dict[str, List[Optional[Tensor]]]],
+            log_probs: bool,
+            sample: Optional[Dict[str, Tensor]] = None,
     ):
         """Get normalized probabilities (or log probs) from a net's output."""
         return self.get_normalized_probs_scriptable(net_output, log_probs, sample)
-
-
 
 
 @register_model("transformer_align")
@@ -330,12 +372,12 @@ class TransformerAlignModel(TransformerModel):
         return self.forward_decoder(prev_output_tokens, encoder_out)
 
     def forward_decoder(
-        self,
-        prev_output_tokens,
-        encoder_out=None,
-        incremental_state=None,
-        features_only=False,
-        **extra_args,
+            self,
+            prev_output_tokens,
+            encoder_out=None,
+            incremental_state=None,
+            features_only=False,
+            **extra_args,
     ):
         attn_args = {
             "alignment_layer": self.alignment_layer,
@@ -425,11 +467,11 @@ class TransformerEncoder(FairseqEncoder):
         return x, embed
 
     def forward(
-        self,
-        src_tokens,
-        src_lengths,
-        cls_input: Optional[Tensor] = None,
-        return_all_hiddens: bool = False,
+            self,
+            src_tokens,
+            src_lengths,
+            cls_input: Optional[Tensor] = None,
+            return_all_hiddens: bool = False,
     ):
         """
         Args:
@@ -488,7 +530,7 @@ class TransformerEncoder(FairseqEncoder):
         )
 
     @torch.jit.export
-    def reorder_encoder_out(self, encoder_out: EncoderOut, new_order):
+    def reorder_encoder_out(self, encoder_out: EncoderOut, new_order, is_graph=False):
         """
         Reorder encoder output according to *new_order*.
 
@@ -499,35 +541,48 @@ class TransformerEncoder(FairseqEncoder):
         Returns:
             *encoder_out* rearranged according to *new_order*
         """
-        new_encoder_out: Dict[str, Tensor] = {}
+        if is_graph is False:
+            new_encoder_out: Dict[str, Tensor] = {}
 
-        new_encoder_out["encoder_out"] = (
-            encoder_out.encoder_out
-            if encoder_out.encoder_out is None
-            else encoder_out.encoder_out.index_select(1, new_order)
-        )
-        new_encoder_out["encoder_padding_mask"] = (
-            encoder_out.encoder_padding_mask
-            if encoder_out.encoder_padding_mask is None
-            else encoder_out.encoder_padding_mask.index_select(0, new_order)
-        )
-        new_encoder_out["encoder_embedding"] = (
-            encoder_out.encoder_embedding
-            if encoder_out.encoder_embedding is None
-            else encoder_out.encoder_embedding.index_select(0, new_order)
-        )
+            new_encoder_out["encoder_out"] = (
+                encoder_out.encoder_out
+                if encoder_out.encoder_out is None
+                else encoder_out.encoder_out.index_select(1, new_order)
+            )
+            new_encoder_out["encoder_padding_mask"] = (
+                encoder_out.encoder_padding_mask
+                if encoder_out.encoder_padding_mask is None
+                else encoder_out.encoder_padding_mask.index_select(0, new_order)
+            )
+            new_encoder_out["encoder_embedding"] = (
+                encoder_out.encoder_embedding
+                if encoder_out.encoder_embedding is None
+                else encoder_out.encoder_embedding.index_select(0, new_order)
+            )
 
-        encoder_states = encoder_out.encoder_states
-        if encoder_states is not None:
-            for idx, state in enumerate(encoder_states):
-                encoder_states[idx] = state.index_select(1, new_order)
+            encoder_states = encoder_out.encoder_states
+            if encoder_states is not None:
+                for idx, state in enumerate(encoder_states):
+                    encoder_states[idx] = state.index_select(1, new_order)
 
-        return EncoderOut(
-            encoder_out=new_encoder_out["encoder_out"],  # T x B x C
-            encoder_padding_mask=new_encoder_out["encoder_padding_mask"],  # B x T
-            encoder_embedding=new_encoder_out["encoder_embedding"],  # B x T x C
-            encoder_states=encoder_states,  # List[T x B x C]
-        )
+            return EncoderOut(
+                encoder_out=new_encoder_out["encoder_out"],  # T x B x C
+                encoder_padding_mask=new_encoder_out["encoder_padding_mask"],  # B x T
+                encoder_embedding=new_encoder_out["encoder_embedding"],  # B x T x C
+                encoder_states=encoder_states,  # List[T x B x C]
+            )
+        else:
+            index = 0
+            encoder_out['encoder_out'] = tuple(
+                eo.index_select(index, new_order)
+                for eo in encoder_out['encoder_out']
+            )
+            if encoder_out['encoder_padding_mask'] is not None:
+                if is_graph:
+                    index += 1
+                encoder_out['encoder_padding_mask'] = \
+                    encoder_out['encoder_padding_mask'].index_select(index, new_order)
+            return encoder_out
 
     def max_positions(self):
         """Maximum input length supported by the encoder."""
@@ -538,9 +593,9 @@ class TransformerEncoder(FairseqEncoder):
     def buffered_future_mask(self, tensor):
         dim = tensor.size(0)
         if (
-            not hasattr(self, "_future_mask")
-            or self._future_mask is None
-            or self._future_mask.device != tensor.device
+                not hasattr(self, "_future_mask")
+                or self._future_mask is None
+                or self._future_mask.device != tensor.device
         ):
             self._future_mask = torch.triu(
                 utils.fill_with_neg_inf(tensor.new(dim, dim)), 1
@@ -665,7 +720,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             nn.init.normal_(self.embed_out, mean=0, std=self.output_embed_dim ** -0.5)
 
         if args.decoder_normalize_before and not getattr(
-            args, "no_decoder_final_norm", False
+                args, "no_decoder_final_norm", False
         ):
             self.layer_norm = LayerNorm(embed_dim)
         else:
@@ -678,16 +733,18 @@ class TransformerDecoder(FairseqIncrementalDecoder):
     def build_decoder_layer(self, args, no_encoder_attn=False):
         return TransformerDecoderLayer(args, no_encoder_attn)
 
+    # prev_output_tokens, encoder_out = None, graph_encoder_out = None, incremental_state = None
     def forward(
-        self,
-        prev_output_tokens,
-        encoder_out: Optional[EncoderOut] = None,
-        incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
-        features_only: bool = False,
-        alignment_layer: Optional[int] = None,
-        alignment_heads: Optional[int] = None,
-        src_lengths: Optional[Any] = None,
-        return_all_hiddens: bool = False,
+            self,
+            prev_output_tokens,
+            encoder_out: Optional[EncoderOut] = None,
+            graph_encoder_out=None,
+            incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
+            features_only: bool = False,
+            alignment_layer: Optional[int] = None,
+            alignment_heads: Optional[int] = None,
+            src_lengths: Optional[Any] = None,
+            return_all_hiddens: bool = False,
     ):
         """
         Args:
@@ -708,6 +765,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         x, extra = self.extract_features(
             prev_output_tokens,
             encoder_out=encoder_out,
+            graph_encoder_out=graph_encoder_out,
             incremental_state=incremental_state,
             alignment_layer=alignment_layer,
             alignment_heads=alignment_heads,
@@ -717,13 +775,14 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         return x, extra
 
     def extract_features(
-        self,
-        prev_output_tokens,
-        encoder_out: Optional[EncoderOut] = None,
-        incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
-        full_context_alignment: bool = False,
-        alignment_layer: Optional[int] = None,
-        alignment_heads: Optional[int] = None,
+            self,
+            prev_output_tokens,
+            encoder_out: Optional[EncoderOut] = None,
+            graph_encoder_out=None,
+            incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
+            full_context_alignment: bool = False,
+            alignment_layer: Optional[int] = None,
+            alignment_heads: Optional[int] = None,
     ):
         """
         Similar to *forward* but only return features.
@@ -755,6 +814,14 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             if self.embed_positions is not None
             else None
         )
+        if graph_encoder_out is not None:
+            graph_encoder_out, graph_encoder_padding_mask = graph_encoder_out.values()
+            graph_hidden, graph_out = graph_encoder_out
+            graph_out = graph_out.permute(1, 0, 2)
+            graph_encoder_padding_mask = graph_encoder_padding_mask.permute(1, 0)
+        else:
+            graph_hidden = graph_out = None
+            graph_encoder_padding_mask = None
 
         if incremental_state is not None:
             prev_output_tokens = prev_output_tokens[:, -1:]
@@ -769,6 +836,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         if positions is not None:
             x += positions
+        if graph_hidden is not None:
+            graph_hidden_ = graph_hidden.unsqueeze(1).repeat(1, x.shape[1], 1)
+            x += graph_hidden_
 
         if self.layernorm_embedding is not None:
             x = self.layernorm_embedding(x)
@@ -809,7 +879,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                     encoder_out.encoder_padding_mask
                     if encoder_out is not None
                     else None,
-                    incremental_state,
+                    incremental_state=incremental_state,
+                    graph_encoder_out=graph_out,
+                    graph_encoder_padding_mask=graph_encoder_padding_mask,
                     self_attn_mask=self_attn_mask,
                     self_attn_padding_mask=self_attn_padding_mask,
                     need_attn=bool((idx == alignment_layer)),
@@ -858,9 +930,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         dim = tensor.size(0)
         # self._future_mask.device != tensor.device is not working in TorchScript. This is a workaround.
         if (
-            self._future_mask.size(0) == 0
-            or (not self._future_mask.device == tensor.device)
-            or self._future_mask.size(0) < dim
+                self._future_mask.size(0) == 0
+                or (not self._future_mask.device == tensor.device)
+                or self._future_mask.size(0) < dim
         ):
             self._future_mask = torch.triu(
                 utils.fill_with_neg_inf(torch.zeros([dim, dim])), 1
@@ -871,9 +943,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
     # Overwirte the method to temporaily soppurt jit scriptable in Transformer
     @torch.jit.export
     def reorder_incremental_state(
-        self,
-        incremental_state: Dict[str, Dict[str, Optional[Tensor]]],
-        new_order: Tensor,
+            self,
+            incremental_state: Dict[str, Dict[str, Optional[Tensor]]],
+            new_order: Tensor,
     ):
         """Scriptable reorder incremental state in the transformer."""
         for layer in self.layers:
@@ -944,6 +1016,17 @@ def base_architecture(args):
     args.decoder_ffn_embed_dim = getattr(
         args, "decoder_ffn_embed_dim", args.encoder_ffn_embed_dim
     )
+
+    args.graph_encoder_embed_dim = getattr(args, 'graph_encoder_embed_dim', 128)
+    args.aggr = getattr(args, 'aggr', "maxpooling")
+    args.graph_in_dropout = getattr(args, 'graph_in_dropout', 0.2)
+    args.graph_out_dropout = getattr(args, 'graph_out_dropout', 0.2)
+    args.n_graph_layers = getattr(args, 'n_graph_layers', 2)
+    args.concat_in_aggr = getattr(args, 'concat_in_aggr', True)
+    args.n_highways = getattr(args, 'n_highways', 1)
+    args.direction = getattr(args, 'direction', 'bi')
+    args.graph_attention_heads = getattr(args, 'graph-attention-heads', 2)
+    args.use_scalenorm = getattr(args, 'use-scalenorm', False)
     args.decoder_layers = getattr(args, "decoder_layers", 6)
     args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 8)
     args.decoder_normalize_before = getattr(args, "decoder_normalize_before", False)

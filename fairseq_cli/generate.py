@@ -18,6 +18,22 @@ from fairseq import bleu, checkpoint_utils, options, tasks, utils
 from fairseq.logging import progress_bar
 from fairseq.logging.meters import StopwatchMeter, TimeMeter
 from fairseq.data import encoders
+from matplotlib import pyplot as plt
+from matplotlib import ticker
+import os
+
+def plot_attn(src, hypo, attn_weight, src_sent):
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111)
+
+    attn = attn_weight.cpu().detach().numpy()
+    cax = ax.matshow(attn, cmap='inferno')
+    ax.tick_params(labelsize=15)
+    ax.set_xticklabels(src, rotation=45)
+    ax.set_yticklabels(hypo)
+    ax.xaxis.set_major_locator(ticker.MultipleLocator(1))
+    ax.yaxis.set_major_locator(ticker.MultipleLocator(1))
+    plt.save(os.path.join("fig", src_sent+".png"))
 
 
 def main(args):
@@ -219,6 +235,16 @@ def _main(args, output_file):
                             ' '.join(['{}-{}'.format(src_idx, tgt_idx) for src_idx, tgt_idx in alignment])
                         ), file=output_file)
 
+                    # plot attention weights
+                    # only plot which sentence has length in range 10 and 15
+                    if args.plot_attn:
+                        if not os.path.exists("./fig"):
+                            os.mkdir("./fig")
+                        len_sent = len(src_str.split())
+                    if len_sent >= args.min_plot_len and len_sent <= args.max_plot_len:
+                            src__ = [''] + ['<sos>'] + src_str.split() + ['<eos>']
+                            hypo__ = [''] + detok_hypo_str.split() + ['<eos>']
+                            plot_attn(src__,hypo__, hypos[0][0]['attention'], src_str)
                     if args.print_step:
                         print('I-{}\t{}'.format(sample_id, hypo['steps']), file=output_file)
 

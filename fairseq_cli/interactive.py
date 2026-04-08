@@ -29,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger('fairseq_cli.interactive')
 
 
-Batch = namedtuple('Batch', 'ids src_tokens src_lengths graph_tokens graph_lengths')
+Batch = namedtuple('Batch', 'ids src_tokens src_lengths')
 Translation = namedtuple('Translation', 'src_str hypos pos_scores alignments')
 
 
@@ -49,18 +49,13 @@ def buffered_read(input, buffer_size):
 def make_batches(lines, args, task, max_positions, encode_fn):
     tokens = [
         task.source_dictionary.encode_line(
-            encode_fn(lines[0]), add_if_not_exist=False
+            encode_fn(src_str), add_if_not_exist=False
         ).long()
+        for src_str in lines
     ]
-    if args.with_amr:
-        amr_tokens = [task.amr_dict.encode_graph_info(lines[1], add_if_not_exist=False)]
-        amr_lengths = [amr_tokens[0][0].numel()]
-    else:
-        amr_tokens = amr_lengths=None
     lengths = [t.numel() for t in tokens]
-
     itr = task.get_batch_iterator(
-        dataset=task.build_dataset_for_inference(tokens, lengths, amr_tokens=amr_tokens, amr_lengths=amr_lengths),
+        dataset=task.build_dataset_for_inference(tokens, lengths),
         max_tokens=args.max_tokens,
         max_sentences=args.max_sentences,
         max_positions=max_positions,
@@ -70,7 +65,6 @@ def make_batches(lines, args, task, max_positions, encode_fn):
         yield Batch(
             ids=batch['id'],
             src_tokens=batch['net_input']['src_tokens'], src_lengths=batch['net_input']['src_lengths'],
-            graph_tokens=batch['net_input']["graph_tokens"], graph_lengths=batch['net_input']['graph_lengths']
         )
 
 
@@ -153,22 +147,10 @@ def main(args):
     logger.info('Type the input sentence and press return:')
     start_id = 0
     for inputs in buffered_read(args.input, args.buffer_size):
-        if args.with_amr is True:
-            # print("And a corresponding AMR graph:")
-            amr_graph = input()
-            if amr_graph is not None:
-                from fairseq_cli.clean_amr import clean
-                amr_graph = clean(amr_graph)
-                # print(amr_graph)
-                inputs.append(amr_graph)
-            else:
-                args.with_amr = False
         results = []
         for batch in make_batches(inputs, args, task, max_positions, encode_fn):
             src_tokens = batch.src_tokens
             src_lengths = batch.src_lengths
-            graph_tokens = batch.graph_tokens
-            graph_lengths = batch.graph_lengths
             if use_cuda:
                 src_tokens = src_tokens.cuda()
                 src_lengths = src_lengths.cuda()
@@ -177,11 +159,9 @@ def main(args):
                 'net_input': {
                     'src_tokens': src_tokens,
                     'src_lengths': src_lengths,
-                    'graph_tokens': graph_tokens,
-                    'graph_lengths': graph_lengths  # n_in_indices and n_out_indices are equal to nnodes
                 },
             }
-            translations = task.inference_step(generator, models, sample, args=args)
+            translations = task.inference_step(generator, models, sample)
             for i, (id, hypos) in enumerate(zip(batch.ids.tolist(), translations)):
                 src_tokens_i = utils.strip_pad(src_tokens[i], tgt_dict.pad())
                 results.append((start_id + id, src_tokens_i, hypos))
