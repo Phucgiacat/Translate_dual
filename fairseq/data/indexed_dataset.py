@@ -87,7 +87,7 @@ dtypes = {
     4: np.int32,
     5: np.int64,
     6: np.float64,
-    7: np.double,
+    7: np.float64,
     8: np.uint16
 }
 
@@ -289,8 +289,8 @@ class IndexedDatasetBuilder(object):
         np.int16: 2,
         np.int32: 4,
         np.int64: 8,
-        np.float: 4,
-        np.double: 8
+        np.float32: 4,
+        np.float64: 8
     }
 
     def __init__(self, out_file, dtype=np.int32):
