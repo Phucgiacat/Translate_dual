@@ -394,7 +394,7 @@ class SequenceGenerator(object):
             eos_bbsz_idx = torch.masked_select(
                 cand_bbsz_idx[:, :beam_size],
                 mask=eos_mask[:, :beam_size].bool(),
-            )
+            ).long()
 
             finalized_sents = set()
             if eos_bbsz_idx.numel() > 0:
