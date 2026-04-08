@@ -8,57 +8,6 @@ from fairseq.models.aggregators import MaxPoolingAggregator, MeanAggregator, GCN
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class AttentionPooling(nn.Module):
-    """
-    Attention-based pooling over graph nodes with optional root node bias.
-
-    Thay thế MaxPool: thay vì lấy max, ta học weighted sum qua tất cả nodes.
-    Root node (index 0) trong AMR luôn là predicate chính của câu, nên được
-    thêm một learnable bias vào attention logit để ưu tiên nó.
-
-    Args:
-        dim (int): chiều của node representation.
-        root_bias (bool): nếu True, thêm learnable scalar bias cho root node.
-    """
-    def __init__(self, dim, root_bias=True):
-        super().__init__()
-        self.score_proj = nn.Linear(dim, 1, bias=True)
-        self.use_root_bias = root_bias
-        if root_bias:
-            # Learnable scalar chỉ cộng vào logit của root node (index 0)
-            self.root_logit_bias = nn.Parameter(torch.zeros(1))
-        nn.init.xavier_uniform_(self.score_proj.weight)
-
-    def forward(self, node_reps, node_mask=None):
-        """
-        Args:
-            node_reps  (Tensor): [B, N, dim]  -- node representations
-            node_mask  (Tensor): [N, B] bool  -- True nghĩa là padding node
-                                  (cùng convention với encoder_padding_mask)
-        Returns:
-            pooled (Tensor): [B, dim]
-        """
-        # Tính attention score: [B, N, 1] -> [B, N]
-        scores = self.score_proj(node_reps).squeeze(-1)
-
-        if self.use_root_bias:
-            # Root node = index 0; cộng bias chỉ vào cột đầu tiên
-            scores = scores.clone()  # tránh in-place trên autograd
-            scores[:, 0] = scores[:, 0] + self.root_logit_bias.squeeze()
-
-        if node_mask is not None:
-            # node_mask là [N, B]; transpose thành [B, N] trước khi mask
-            mask_BN = node_mask.t().bool()
-            scores = scores.masked_fill(mask_BN, float('-inf'))
-
-        weights = torch.softmax(scores, dim=-1)  # [B, N]
-        # Xử lý trường hợp tất cả nodes đều bị padding (softmax(-inf) = nan)
-        weights = torch.nan_to_num(weights, nan=0.0)
-
-        pooled = (weights.unsqueeze(-1) * node_reps).sum(dim=1)  # [B, dim]
-        return pooled
-
-
 class Highway(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(Highway, self).__init__()
@@ -143,9 +92,6 @@ class GraphEncoder(FairseqEncoder):
                 self.fc_out = nn.Linear(self.hidden_dim * 2, output_dim, bias=False)
             else:
                 self.fc_out = nn.Linear(self.hidden_dim, output_dim, bias=False)
-
-        # Attention pooling thay thế MaxPool; pool trên không gian sau fc_out
-        self.attn_pool = AttentionPooling(output_dim, root_bias=True)
 
     def __create_mask(self, graph_tokens):
         ids, node_feats, edge_feats, nodes, edges, out_indices, out_edges, in_indices, in_edges = graph_tokens.values()
@@ -303,14 +249,13 @@ class GraphEncoder(FairseqEncoder):
             # [batch_size, num_nodes, 4 * hidden_dim]
             graph_encoder_output = F.relu(torch.cat((fw_hidden, bw_hidden), dim=2))
 
-        # Project node reps to output_dim first (node-wise)
+        graph_hidden = torch.max(graph_encoder_output, dim=1)[0]  # [batch_size, 4*hidden_dim]
+
         if self.fc_out:
-            graph_encoder_output = self.fc_out(graph_encoder_output)  # [B, N, output_dim]
-
-        # Attention pooling với root bias thay thế MaxPool
-        # graph_hidden: [B, output_dim] -- sentence-level graph repr
-        graph_hidden = self.attn_pool(graph_encoder_output, node_mask)
-
+            graph_hidden = self.fc_out(graph_hidden)
+            graph_encoder_output = self.fc_out(graph_encoder_output)
+        # graph_hidden: [batch_size, num_nodes,hidden_dim]
+        # graph_encoder_output: [batch_size, hidden_dim]
         return {
             "encoder_out":
                 (graph_hidden, graph_encoder_output),
@@ -475,9 +420,6 @@ class ViGraphEncoder(FairseqEncoder):
         #                               last_layer=True)
         self.compact = nn.Linear(embedding_dim, hidden_dim)
 
-        # Attention pooling với root bias thay thế MaxPool
-        self.attn_pool = AttentionPooling(hidden_dim, root_bias=True)
-
     def __create_mask(self, graph_tokens):
         ids, node_feats, edge_feats, nodes, edges, out_indices, out_edges, in_indices, in_edges = graph_tokens.values()
         batch_size, num_nodes = nodes.shape
@@ -574,17 +516,18 @@ class ViGraphEncoder(FairseqEncoder):
         for layer in self.layers:
             x_, attn_weights = layer(x_, fw_node_reps, fw_edge_reps, bw_node_reps, bw_edge_reps, num_nodes, feed_mask)
 
+        # x = torch.cat(x, dim=1)
         x = self.compact(x_)
         x = nn.functional.relu(x)
         x = torch.dropout(x, self.dropout, train=self.training)
+        # x, fw_reps, bw_reps = self.graph_out(x, fw_hiddens, bw_hiddens, num_nodes)
+        graph_encoder_output = x.reshape(batch_size, num_nodes, -1)
+        graph_hidden = torch.max(x, dim=1)[0]  # [batch_size, 4*hidden_dim]
 
-        # Reshape về [B, N, hidden_dim] để pooling
-        graph_encoder_output = x.reshape(batch_size, num_nodes, -1)  # [B, N, hidden_dim]
-
-        # Attention pooling với root bias thay thế MaxPool
-        # node_mask: [N, B] (True = padding) -- truyền thẳng vào AttentionPooling
-        graph_hidden = self.attn_pool(graph_encoder_output, node_mask)  # [B, hidden_dim]
-
+        # if self.fc_out:
+        #     graph_hidden = self.fc_out(graph_hidden)
+        # graph_hidden: [batch_size, num_nodes,hidden_dim]
+        # graph_encoder_output: [batch_size, hidden_dim]
         return {
             "encoder_out":
                 (graph_hidden, graph_encoder_output),

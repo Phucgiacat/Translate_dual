@@ -340,30 +340,19 @@ class TranslationTask(FairseqTask):
                 def compute_bleu(meters):
                     import inspect
                     import sacrebleu
-                    if hasattr(sacrebleu, 'compute_bleu'):
-                        fn_sig = inspect.getfullargspec(sacrebleu.compute_bleu)[0]
-                        if 'smooth_method' in fn_sig:
-                            smooth = {'smooth_method': 'exp'}
-                        else:
-                            smooth = {'smooth': 'exp'}
-                        bleu = sacrebleu.compute_bleu(
-                            correct=meters['_bleu_counts'].sum,
-                            total=meters['_bleu_totals'].sum,
-                            sys_len=meters['_bleu_sys_len'].sum,
-                            ref_len=meters['_bleu_ref_len'].sum,
-                            **smooth
-                        )
-                        return round(bleu.score, 2)
+                    fn_sig = inspect.getfullargspec(sacrebleu.compute_bleu)[0]
+                    if 'smooth_method' in fn_sig:
+                        smooth = {'smooth_method': 'exp'}
                     else:
-                        # sacrebleu >= 2.0: compute manually using BLEU class
-                        correct = meters['_bleu_counts'].sum.tolist()
-                        total = meters['_bleu_totals'].sum.tolist()
-                        sys_len = int(meters['_bleu_sys_len'].sum)
-                        ref_len = int(meters['_bleu_ref_len'].sum)
-                        bleu = sacrebleu.BLEU.compute_bleu(
-                            correct, total, sys_len, ref_len, smooth_method='exp'
-                        )
-                        return round(bleu.score, 2)
+                        smooth = {'smooth': 'exp'}
+                    bleu = sacrebleu.compute_bleu(
+                        correct=meters['_bleu_counts'].sum,
+                        total=meters['_bleu_totals'].sum,
+                        sys_len=meters['_bleu_sys_len'].sum,
+                        ref_len=meters['_bleu_ref_len'].sum,
+                        **smooth
+                    )
+                    return round(bleu.score, 2)
 
                 metrics.log_derived('bleu', compute_bleu)
 
@@ -394,7 +383,7 @@ class TranslationTask(FairseqTask):
                 s = self.tokenizer.decode(s)
             return s
 
-        gen_out = self.inference_step(generator, [model], sample, self.args)
+        gen_out = self.inference_step(generator, [model], sample, None)
         hyps, refs = [], []
         for i in range(len(gen_out)):
             hyps.append(decode(gen_out[i][0]['tokens']))
@@ -405,8 +394,5 @@ class TranslationTask(FairseqTask):
         if self.args.eval_bleu_print_samples:
             logger.info('example hypothesis: ' + hyps[0])
             logger.info('example reference: ' + refs[0])
-
-        # sacrebleu >= 2.0 removed DEFAULT_TOKENIZER; fall back to '13a'
-        tokenize = getattr(sacrebleu, 'DEFAULT_TOKENIZER', '13a') if not self.args.eval_tokenized_bleu else 'none'
+        tokenize = sacrebleu.DEFAULT_TOKENIZER if not self.args.eval_tokenized_bleu else 'none'
         return sacrebleu.corpus_bleu(hyps, [refs], tokenize=tokenize)
-

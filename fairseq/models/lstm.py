@@ -167,29 +167,24 @@ class LSTMModel(FairseqEncoderDecoderModel):
         )
         g_encoder = None
         if args.with_amr:
-            # Keep backward compatibility with older GCN checkpoints.
-            if getattr(args, "aggr", None) == "gcn":
-                g_encoder = graph_encoder.GraphEncoder(
-                    dictionary=task.amr_dict,
-                    embedding_dim=args.graph_encoder_embed_dim,
-                    output_dim=args.decoder_hidden_size,
-                    dropout=args.graph_in_dropout,
-                    pad_idx=task.amr_dict.pad(),
-                    n_layers=args.n_graph_layers,
-                    aggr=args.aggr,
-                    concat=args.concat_in_aggr,
-                    n_highway=args.n_highways,
-                    direction=args.direction,
-                )
-            else:
-                g_encoder = graph_encoder.ViGraphEncoder(
-                    dictionary=task.amr_dict,
-                    embedding_dim=args.graph_encoder_embed_dim,
-                    hidden_dim=args.decoder_hidden_size,
-                    dropout=args.graph_in_dropout,
-                    n_layers=args.n_graph_layers,
-                    n_heads=args.n_heads,
-                )
+            # g_encoder = graph_encoder.GraphEncoder(dictionary=task.amr_dict,
+            #                                        embedding_dim=args.graph_encoder_embed_dim,
+            #                                        output_dim=args.decoder_hidden_size,
+            #                                        dropout=args.graph_in_dropout,
+            #                                        pad_idx=task.amr_dict.pad(),
+            #                                        n_layers=args.n_graph_layers,
+            #                                        aggr=args.aggr,
+            #                                        concat=args.concat_in_aggr,
+            #                                        n_highway=args.n_highways,
+            #                                        direction=args.direction,
+            #                                        )
+            #
+            g_encoder = graph_encoder.ViGraphEncoder(dictionary=task.amr_dict,
+                                                     embedding_dim=args.graph_encoder_embed_dim,
+                                                     hidden_dim=args.decoder_hidden_size,
+                                                     dropout=args.graph_in_dropout,
+                                                     n_layers=args.n_graph_layers,
+                                                     n_heads = args.n_heads)
 
         decoder = LSTMDecoder(
             dictionary=task.target_dictionary,

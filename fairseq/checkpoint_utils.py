@@ -162,17 +162,9 @@ def load_checkpoint(args, trainer, **passthrough_args):
 def load_checkpoint_to_cpu(path, arg_overrides=None):
     """Loads a checkpoint to CPU (with upgrading for backward compatibility)."""
     with PathManager.open(path, "rb") as f:
-        try:
-            state = torch.load(
-                f,
-                map_location=lambda s, l: default_restore_location(s, "cpu"),
-                weights_only=False,
-            )
-        except TypeError:
-            # Older PyTorch versions don't support the weights_only kwarg.
-            state = torch.load(
-                f, map_location=lambda s, l: default_restore_location(s, "cpu")
-            )
+        state = torch.load(
+            f, map_location=lambda s, l: default_restore_location(s, "cpu")
+        )
 
     args = state["args"]
     if arg_overrides is not None:
