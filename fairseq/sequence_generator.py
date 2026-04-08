@@ -353,7 +353,7 @@ class SequenceGenerator(object):
 
             scores = scores.type_as(lprobs)
             scores_buf = scores_buf.type_as(lprobs)
-            eos_bbsz_idx = buffer('eos_bbsz_idx')
+            eos_bbsz_idx = buffer('eos_bbsz_idx', type_of=cand_bbsz_idx)
             eos_scores = buffer('eos_scores', type_of=scores)
 
             self.search.set_src_lengths(src_lengths)
