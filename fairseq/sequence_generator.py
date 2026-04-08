@@ -353,8 +353,6 @@ class SequenceGenerator(object):
 
             scores = scores.type_as(lprobs)
             scores_buf = scores_buf.type_as(lprobs)
-            eos_bbsz_idx = buffer('eos_bbsz_idx', type_of=cand_bbsz_idx)
-            eos_scores = buffer('eos_scores', type_of=scores)
 
             self.search.set_src_lengths(src_lengths)
 
@@ -387,6 +385,14 @@ class SequenceGenerator(object):
             # and dimensions: [bsz, cand_size]
             cand_bbsz_idx = cand_beams.add(bbsz_offsets)
 
+            # Initialize output buffers with correct dtype on first step
+            if step == 0:
+                buffers['eos_bbsz_idx'] = cand_bbsz_idx.new_zeros(bsz * beam_size)
+                buffers['eos_scores'] = scores.new_zeros(bsz * beam_size)
+            
+            eos_bbsz_idx = buffers['eos_bbsz_idx']
+            eos_scores = buffers['eos_scores']
+            
             # finalize hypotheses that end in eos, except for blacklisted ones
             # or candidates with a score of -inf
             eos_mask = cand_indices.eq(self.eos) & cand_scores.ne(-math.inf)
