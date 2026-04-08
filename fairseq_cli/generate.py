@@ -29,11 +29,19 @@ def plot_attn(src, hypo, attn_weight, src_sent):
     attn = attn_weight.cpu().detach().numpy()
     cax = ax.matshow(attn, cmap='inferno')
     ax.tick_params(labelsize=15)
+    
+    # Set ticks before ticklabels
+    ax.set_xticks(range(len(src)))
+    ax.set_yticks(range(len(hypo)))
     ax.set_xticklabels(src, rotation=45)
     ax.set_yticklabels(hypo)
     ax.xaxis.set_major_locator(ticker.MultipleLocator(1))
     ax.yaxis.set_major_locator(ticker.MultipleLocator(1))
-    plt.save(os.path.join("fig", src_sent+".png"))
+    
+    # Ensure output directory exists
+    os.makedirs("fig", exist_ok=True)
+    plt.savefig(os.path.join("fig", src_sent+".png"))
+    plt.close(fig)
 
 
 def main(args):
