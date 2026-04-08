@@ -237,10 +237,10 @@ def _main(args, output_file):
 
                     # plot attention weights
                     # only plot which sentence has length in range 10 and 15
+                    len_sent = len(src_str.split())
                     if args.plot_attn:
                         if not os.path.exists("./fig"):
                             os.mkdir("./fig")
-                        len_sent = len(src_str.split())
                     if len_sent >= args.min_plot_len and len_sent <= args.max_plot_len:
                             src__ = [''] + ['<sos>'] + src_str.split() + ['<eos>']
                             hypo__ = [''] + detok_hypo_str.split() + ['<eos>']
